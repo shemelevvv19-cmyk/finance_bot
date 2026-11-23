@@ -6,14 +6,14 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import re
+import numpy as np
+from scipy.interpolate import make_interp_spline
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiohttp import web
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 
 BOT_TOKEN = '9147667306:AAFP3McHJOBHGMScJg0WBcMvaqnhRk6hHXU'
 bot = Bot(token=BOT_TOKEN)
@@ -23,7 +23,6 @@ dp = Dispatcher()
 def init_db():
     conn = sqlite3.connect('finance.db')
     c = conn.cursor()
-    # Добавили колонку currency для валюты
     c.execute('''CREATE TABLE IF NOT EXISTS money
                  (user_id INTEGER, date_time TEXT, amount REAL, currency TEXT)''')
     conn.commit()
@@ -84,11 +83,8 @@ async def cmd_start(message: types.Message):
 async def process_free_text(message: types.Message):
     text = message.text.lower().strip()
     
-    # Регулярное выражение для поиска даты (ДД.ММ.ГГГГ или ДД.ММ)
     date_match = re.search(r'(\d{1,2}\.\d{1,2}(?:\.\d{2,4})?)', text)
-    # Поиск времени (ЧЧ:ММ) - необязательно
     time_match = re.search(r'(\d{1,2}:\d{2})', text)
-    # Поиск суммы (число с возможным минусом)
     amount_match = re.search(r'(-?\d+(?:\.\d+)?)', text.replace(date_match.group(1) if date_match else "", "").replace(time_match.group(1) if time_match else "", ""))
     
     if not date_match or not amount_match:
@@ -99,18 +95,15 @@ async def process_free_text(message: types.Message):
     time_str = time_match.group(1) if time_match else "00:00"
     amount = float(amount_match.group(1))
     
-    # Определяем валюту
     currency = "RUB"
     if "usd" in text or "$" in text:
         currency = "USD"
     elif "eur" in text or "€" in text:
         currency = "EUR"
 
-    # Если дата без года (например, 23.11), добавляем текущий год
     if len(date_str.split('.')) == 2:
         date_str = f"{date_str}.{datetime.now().year}"
 
-    # Проверяем корректность даты
     try:
         datetime.strptime(date_str, "%d.%m.%Y")
         if time_match:
@@ -122,12 +115,11 @@ async def process_free_text(message: types.Message):
     full_datetime = f"{date_str} {time_str}"
     add_money(message.from_user.id, full_datetime, amount, currency)
     
-    # Форматируем ответ
     sign = "➕ Доход" if amount > 0 else "➖ Расход"
     currency_symbol = "₽" if currency == "RUB" else ("$" if currency == "USD" else "€")
     await message.answer(f"✅ {sign} сохранен: {full_datetime} — {abs(amount)} {currency_symbol}", reply_markup=get_main_menu())
 
-# --- График ---
+# --- ГРАФИК С ВОЛНОВОЙ ЛИНИЕЙ ---
 @dp.callback_query(F.data == "show_chart")
 async def show_chart(callback: CallbackQuery):
     data = get_money(callback.from_user.id)
@@ -138,10 +130,9 @@ async def show_chart(callback: CallbackQuery):
 
     dates = [row[0] for row in data]
     amounts = [row[1] for row in data]
-    # Валюты мы пока не выводим на график, чтобы не усложнять, просто рисуем суммы
 
     plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(12, 6)) 
     fig.patch.set_facecolor('black')
     ax.set_facecolor('black')
 
@@ -152,22 +143,34 @@ async def show_chart(callback: CallbackQuery):
     ax.spines['left'].set_color('white')
     ax.spines['bottom'].set_color('white')
 
-    for i in range(len(dates)):
-        color = '#2ecc71' if amounts[i] >= 0 else '#e74c3c'
-        ax.plot(i, amounts[i], marker='o', color=color, markersize=8, zorder=3)
+    ax.grid(True, color='#333333', linestyle='--', linewidth=0.5)
+
+    if len(dates) > 2:
+        x = np.arange(len(dates))
+        y = np.array(amounts)
         
-        va = 'bottom' if amounts[i] >= 0 else 'top'
-        offset = max(amounts) * 0.05 if amounts[i] >= 0 else min(amounts) * 0.05
-        ax.text(i, amounts[i] + offset, f'{amounts[i]:.0f}', color=color, ha='center', va=va, fontsize=9, fontweight='bold')
+        x_smooth = np.linspace(x.min(), x.max(), 500)
+        spline = make_interp_spline(x, y, k=3) 
+        y_smooth = spline(x_smooth)
         
-        if i < len(dates) - 1:
-            next_color = '#2ecc71' if amounts[i+1] >= 0 else '#e74c3c'
-            ax.plot([i, i+1], [amounts[i], amounts[i+1]], color=next_color, linestyle='-', linewidth=2, zorder=2)
+        ax.plot(x_smooth, y_smooth, color='#3498db', linewidth=3, zorder=2, alpha=0.8)
+        
+        for i in range(len(dates)):
+            color = '#2ecc71' if amounts[i] >= 0 else '#e74c3c'
+            ax.plot(i, amounts[i], marker='o', color=color, markersize=9, zorder=3, markeredgecolor='white', markeredgewidth=1)
+            
+            va = 'bottom' if amounts[i] >= 0 else 'top'
+            offset = max(amounts) * 0.08 if amounts[i] >= 0 else min(amounts) * 0.08
+            ax.text(i, amounts[i] + offset, f'{amounts[i]:.0f}', color=color, ha='center', va=va, fontsize=10, fontweight='bold')
+    else:
+        for i in range(len(dates)):
+            color = '#2ecc71' if amounts[i] >= 0 else '#e74c3c'
+            ax.plot(i, amounts[i], marker='o', color=color, markersize=9, zorder=3)
+            ax.text(i, amounts[i], f'{amounts[i]:.0f}', color=color, ha='left', va='bottom', fontsize=10)
 
     ax.set_xticks(range(len(dates)))
-    ax.set_xticklabels(dates, rotation=45, ha='right', color='white', fontsize=8)
-
-    ax.set_title("Финансовый график (слева ноль, по датам)", color='white', pad=20)
+    ax.set_xticklabels(dates, rotation=45, ha='right', color='white', fontsize=9)
+    ax.set_title("Финансовый график (Волновая линия)", color='white', pad=20, fontsize=14)
 
     plt.tight_layout()
     buf = io.BytesIO()
@@ -177,7 +180,7 @@ async def show_chart(callback: CallbackQuery):
     plt.style.use('default')
 
     photo = BufferedInputFile(buf.read(), filename="chart.png")
-    await callback.message.answer_photo(photo=photo, caption="Твой график", reply_markup=get_main_menu())
+    await callback.message.answer_photo(photo=photo, caption="Твой волновой график", reply_markup=get_main_menu())
     await callback.answer()
 
 # --- Удаление ---
